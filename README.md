@@ -23,7 +23,8 @@ Servidor **MinIO** anónimo de la plataforma cubana **ToDus** para almacenar y c
 - [12. Cifrado de enlaces `dktodus.wev.cu/download/<token>`](#12-cifrado-de-enlaces-dktoduswevcudownloadtoken)
 - [13. Ejemplos en código](#13-ejemplos-en-codigo)
 - [14. SDK Python recomendado](#14-sdk-python-recomendado)
-- [15. Referencia de la implementación original en el bot](#15-referencia-de-la-implementacion-original-en-el-bot)
+- [15. 🆓 Sistema UDYAT — descargar sin gastar MB](#15--sistema-udyat--descargar-sin-gastar-mb)
+- [16. Referencia de la implementación original en el bot](#16-referencia-de-la-implementacion-original-en-el-bot)
 
 ---
 
@@ -500,6 +501,8 @@ La app DK ToDus **rechaza** los enlaces directos de `s3.todus.cu` y solo acepta 
 | Python (SDK) | `examples/todus_sdk.py` | SDK completo: upload/download/list/delete |
 | Python (listing) | `examples/python_list_bucket.py` | Listar bucket completo con paginación |
 | Python (DK backend) | `examples/python_dktodus_backend.py` | Auth + list uploads vía backend DK ToDus |
+| **Python (UDYAT)** | `examples/udyat_download.py` | **Descarga sin gastar MB** vía IP gratuita de ToDus |
+| **Bash (UDYAT)** | `examples/udyat_download.sh` | **Descarga sin gastar MB** con wget (Termux/Linux) |
 | JavaScript (Node) | `examples/node_upload.mjs` | Subida con fetch + streams |
 | curl (con reintentos) | `examples/curl_with_retry.sh` | Shell script robusto |
 
@@ -538,7 +541,144 @@ s3.delete(result.url)
 
 ---
 
-## 15. Referencia de la implementación original en el bot
+## 15. 🆓 Sistema UDYAT — descargar sin gastar MB
+
+> **Para usuarios en Cuba** — Descarga archivos del S3 de ToDus **SIN consumir megas** de internet nacional de ETECSA.
+
+### ¿Cómo funciona?
+
+En Cuba, ETECSA factura el tráfico a internet "nacional" (extranjero). Pero el servidor S3 de ToDus tiene una **IP gratuita interna** accesible desde la red cubana SIN consumo de megas:
+
+| IP | Tipo | Estado |
+|---|---|---|
+| `152.207.206.86` | IP gratuita clásica | ✅ Recomendada |
+| `152.207.206.88` | DNS actual (respaldo) | ⚠️ Puede consumir megas |
+
+El truco: reescribir `https://s3.todus.cu/...` → `https://152.207.206.86/...` + header `Host: s3.todus.cu`. El servidor MinIO sirve el archivo desde la IP interna, pero como el header `Host` sigue siendo `s3.todus.cu`, sabe qué vhost servir.
+
+### Cabeceras exactas del sistema UDYAT
+
+```http
+GET /stream/users/df/7970466590/archivo.mp4 HTTP/1.1
+Host: s3.todus.cu
+User-Agent: Wget/1.21.3
+Accept: */*
+Accept-Encoding: identity
+Accept-Language: es-ES,es;q=0.9,en;q=0.8
+Connection: keep-alive
+```
+
+> **TLS:** La IP gratuita sirve un **certificado self-signed** para `s3.todus.cu`. Hay que desactivar la verificación TLS (`--no-check-certificate` en wget, `verify=False` en requests).
+
+### Script Bash (Termux / Linux / macOS)
+
+```bash
+./examples/udyat_download.sh https://s3.todus.cu/stream/users/df/7970466590/pelicula.mp4
+```
+
+Equivalente manual con wget:
+
+```bash
+wget --no-check-certificate \
+     --header="Host: s3.todus.cu" \
+     --user-agent="Wget/1.21.3" \
+     --continue \
+     "https://152.207.206.86/stream/users/df/7970466590/pelicula.mp4"
+```
+
+### Script Python (multiplataforma)
+
+```bash
+# Descarga simple
+python examples/udyat_download.py https://s3.todus.cu/stream/users/df/7970466590/pelicula.mp4
+
+# Multi-hilo (4 conexiones con Range, más rápida)
+python examples/udyat_download.py https://s3.todus.cu/stream/users/df/7970466590/pelicula.mp4 --threads 4
+
+# Test de conectividad
+python examples/udyat_download.py --test
+```
+
+### Ejemplo Python mínimo
+
+```python
+import requests
+import urllib3
+urllib3.disable_warnings()
+
+URL = "https://s3.todus.cu/stream/users/df/7970466590/archivo.mp4"
+FREE_IP = "152.207.206.86"
+
+# Reescribir URL
+new_url = URL.replace("s3.todus.cu", FREE_IP)
+
+# Descargar con cabeceras UDYAT
+resp = requests.get(
+    new_url,
+    headers={
+        "Host": "s3.todus.cu",
+        "User-Agent": "Wget/1.21.3",
+        "Accept": "*/*",
+    },
+    verify=False,  # cert self-signed
+    stream=True,
+)
+
+with open("archivo.mp4", "wb") as f:
+    for chunk in resp.iter_content(1024 * 1024):
+        if chunk:
+            f.write(chunk)
+
+print("✅ Descargado sin gastar MB")
+```
+
+### Detección de la IP gratuita (pre-flight check)
+
+Antes de descargar, hacer un HEAD corto (3s) a la IP gratuita:
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}" \
+    --max-time 3 \
+    --insecure \
+    -H "Host: s3.todus.cu" \
+    -H "User-Agent: Wget/1.21.3" \
+    -I "https://152.207.206.86/"
+```
+
+- HTTP 200/403/404 → IP responde, se puede descargar sin gastar MB ✅
+- Timeout/connection refused → IP no responde, fallback a URL normal (consumirá MB) ❌
+
+### Formato `.udyat` (manifiesto)
+
+La app IroS3Dl y el sistema UDYAT original usan archivos `.udyat` (JSON) con metadatos:
+
+```json
+{
+  "f": "pelicula.mp4",          // filename
+  "s": 298565591,                // size en bytes
+  "md5": "dc1e8f444ba101a961cca6a964596ad2",
+  "c": [                         // chunks (para multi-hilo)
+    {"url": "https://152.207.206.86/stream/users/df/7970466590/pelicula.mp4", "size": 298565591}
+  ],
+  "h": "152.207.206.86",         // IP de respaldo
+  "original_host": "s3.todus.cu",
+  "platform": "android",
+  "token": "..."                  // opcional, para DK ToDus
+}
+```
+
+Para importar: la app IroS3Dl acepta archivos `.udyat` directamente (long-press el botón ➕ en la pantalla de descargas).
+
+### Limitaciones
+
+- **Solo desde Cuba** — Las IPs gratuitas solo responden desde la red cubana de ETECSA.
+- **TLS self-signed** — Hay que desactivar verificación de certificado.
+- **IP puede cambiar** — Si deja de funcionar, verificar con el bot `@DkTodusbot` o probar `152.207.206.88`.
+- **No funciona con `dktodus.wev.cu`** — Ese dominio es un proxy cifrado que solo abre la app DK ToDus. UDYAT solo aplica a URLs `s3.todus.cu/stream/...` directas.
+
+---
+
+## 16. Referencia de la implementación original en el bot
 
 - **Repo:** `juanbas2005/S3` · módulo `bot/s3.py`
 - **Funciones:** `build_url`, `folder_for_user`, `upload_to_s3`, `delete_from_s3`, `delete_many_from_s3`
